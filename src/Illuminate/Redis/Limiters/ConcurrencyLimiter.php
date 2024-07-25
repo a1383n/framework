@@ -4,6 +4,8 @@ namespace Illuminate\Redis\Limiters;
 
 use Illuminate\Contracts\Redis\LimiterTimeoutException;
 use Illuminate\Support\Sleep;
+use Illuminate\Redis\Lua\LuaScript;
+use Illuminate\Redis\Lua\LuaScriptArguments;
 use Illuminate\Support\Str;
 use Throwable;
 
@@ -99,6 +101,8 @@ class ConcurrencyLimiter
      *
      * @param  string  $id  A unique identifier for this lock
      * @return mixed
+     *
+     * @throws \Illuminate\Contracts\Redis\LuaScriptExecuteException
      */
     protected function acquire($id)
     {
@@ -106,10 +110,9 @@ class ConcurrencyLimiter
             return $this->name.$i;
         }, range(1, $this->maxLocks));
 
-        return $this->redis->eval(...array_merge(
-            [$this->lockScript(), count($slots)],
-            array_merge($slots, [$this->name, $this->releaseAfter, $id])
-        ));
+        return $this->redis->lua()
+            ->execute($this->lockScript(), LuaScriptArguments::with($slots, [$this->name, $this->releaseAfter, $id]))
+            ->getResult();
     }
 
     /**
@@ -120,18 +123,18 @@ class ConcurrencyLimiter
      * ARGV[2] - The number of seconds the slot should be reserved
      * ARGV[3] - The unique identifier for this lock
      *
-     * @return string
+     * @return \Illuminate\Redis\Lua\LuaScript
      */
     protected function lockScript()
     {
-        return <<<'LUA'
+        return LuaScript::fromPlainScript(<<<'LUA'
 for index, value in pairs(redis.call('mget', unpack(KEYS))) do
     if not value then
         redis.call('set', KEYS[index], ARGV[3], "EX", ARGV[2])
         return ARGV[1]..index
     end
 end
-LUA;
+LUA);
     }
 
     /**
@@ -140,10 +143,14 @@ LUA;
      * @param  string  $key
      * @param  string  $id
      * @return void
+     *
+     * @throws \Illuminate\Contracts\Redis\LuaScriptExecuteException
      */
     protected function release($key, $id)
     {
-        $this->redis->eval($this->releaseScript(), 1, $key, $id);
+        $this->redis->lua()
+            ->execute($this->releaseScript(), LuaScriptArguments::with([$key], [$id]))
+            ->throwIfError();
     }
 
     /**
@@ -152,17 +159,17 @@ LUA;
      * KEYS[1] - The name of the lock
      * ARGV[1] - The unique identifier for this lock
      *
-     * @return string
+     * @return \Illuminate\Redis\Lua\LuaScript
      */
     protected function releaseScript()
     {
-        return <<<'LUA'
+        return LuaScript::fromPlainScript(<<<'LUA'
 if redis.call('get', KEYS[1]) == ARGV[1]
 then
     return redis.call('del', KEYS[1])
 else
     return 0
 end
-LUA;
+LUA);
     }
 }

@@ -3,6 +3,8 @@
 namespace Illuminate\Redis\Limiters;
 
 use Illuminate\Contracts\Redis\LimiterTimeoutException;
+use Illuminate\Redis\Lua\LuaScript;
+use Illuminate\Redis\Lua\LuaScriptArguments;
 use Illuminate\Support\Sleep;
 
 class DurationLimiter
@@ -99,12 +101,14 @@ class DurationLimiter
      * Attempt to acquire the lock.
      *
      * @return bool
+     *
+     * @throws \Illuminate\Contracts\Redis\LuaScriptExecuteException
      */
     public function acquire()
     {
-        $results = $this->redis->eval(
-            $this->luaScript(), 1, $this->name, microtime(true), time(), $this->decay, $this->maxLocks
-        );
+        $results = $this->redis->lua()
+            ->execute($this->luaScript(), LuaScriptArguments::with([$this->name], [microtime(true), time(), $this->decay, $this->maxLocks]))
+            ->getResult();
 
         $this->decaysAt = $results[1];
 
@@ -117,12 +121,14 @@ class DurationLimiter
      * Determine if the key has been "accessed" too many times.
      *
      * @return bool
+     *
+     * @throws \Illuminate\Contracts\Redis\LuaScriptExecuteException
      */
     public function tooManyAttempts()
     {
-        [$this->decaysAt, $this->remaining] = $this->redis->eval(
-            $this->tooManyAttemptsLuaScript(), 1, $this->name, microtime(true), time(), $this->decay, $this->maxLocks
-        );
+        [$this->decaysAt, $this->remaining] = $this->redis->lua()
+            ->execute($this->tooManyAttemptsLuaScript(), LuaScriptArguments::with([$this->name], [microtime(true), time(), $this->decay, $this->maxLocks]))
+            ->getResult();
 
         return $this->remaining <= 0;
     }
@@ -146,11 +152,11 @@ class DurationLimiter
      * ARGV[3] - Duration of the bucket
      * ARGV[4] - Allowed number of tasks
      *
-     * @return string
+     * @return \Illuminate\Redis\Lua\LuaScript
      */
     protected function luaScript()
     {
-        return <<<'LUA'
+        return LuaScript::fromPlainScript(<<<'LUA'
 local function reset()
     redis.call('HMSET', KEYS[1], 'start', ARGV[2], 'end', ARGV[2] + ARGV[3], 'count', 1)
     return redis.call('EXPIRE', KEYS[1], ARGV[3] * 2)
@@ -169,7 +175,8 @@ if ARGV[1] >= redis.call('HGET', KEYS[1], 'start') and ARGV[1] <= redis.call('HG
 end
 
 return {reset(), ARGV[2] + ARGV[3], ARGV[4] - 1}
-LUA;
+LUA
+        );
     }
 
     /**
@@ -181,12 +188,11 @@ LUA;
      * ARGV[3] - Duration of the bucket
      * ARGV[4] - Allowed number of tasks
      *
-     * @return string
+     * @return \Illuminate\Redis\Lua\LuaScript
      */
     protected function tooManyAttemptsLuaScript()
     {
-        return <<<'LUA'
-
+        return LuaScript::fromPlainScript(<<<'LUA'
 if redis.call('EXISTS', KEYS[1]) == 0 then
     return {0, ARGV[2] + ARGV[3]}
 end
@@ -199,6 +205,7 @@ if ARGV[1] >= redis.call('HGET', KEYS[1], 'start') and ARGV[1] <= redis.call('HG
 end
 
 return {0, ARGV[2] + ARGV[3]}
-LUA;
+LUA
+        );
     }
 }
